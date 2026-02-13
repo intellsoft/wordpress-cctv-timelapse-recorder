@@ -1,4 +1,4 @@
-name: Publish Live CCTV Docs To Wiki
+name: Publish WooCommerce Smart Product Q&A Docs To Wiki
 
 on:
   schedule:
@@ -14,23 +14,25 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Clone Wiki (with auth)
+      - name: Clone Wiki repository
         run: |
-          git clone https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/intellsoft/wordpress-cctv-timelapse-recorder.wiki.git wiki
+          git clone https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/intellsoft/AI-Product-FAQ.wiki.git wiki
 
-      - name: Fetch source page
+      - name: Fetch source documentation page
         run: |
-          curl -L https://intellsoft.ir/docs/live-cctv-camera-view-plugin-guide-for-website/ -o index.html
+          curl -L https://intellsoft.ir/docs/woocommerce-smart-product-qa-wordpress-plugin-guide/ -o index.html
 
-      - name: Install Python dependencies
+      - name: Install dependencies
         run: |
+          sudo apt-get update
+          sudo apt-get install -y pandoc
           python -m pip install --upgrade pip
           pip install beautifulsoup4
 
-      - name: Extract documentation links
+      - name: Extract article links from navigation
         run: |
           mkdir -p articles
           python3 - <<'PYTHON'
@@ -39,20 +41,23 @@ jobs:
           with open("index.html", encoding="utf-8") as f:
               soup = BeautifulSoup(f, "html.parser")
 
-          links = soup.select("a.nav-link")
+          links = soup.find_all("a", class_="nav-link")
 
           with open("articles/list.txt", "w", encoding="utf-8") as out:
               for a in links:
                   href = a.get("href")
                   title = a.get_text(strip=True)
-                  if href and title and href.startswith("http"):
-                      out.write(f"{href}\t{title}\n")
+                  if not href or not title:
+                      continue
+                  if href.startswith("/"):
+                      href = "https://intellsoft.ir" + href
+                  out.write(f"{href}\t{title}\n")
           PYTHON
 
-      - name: Publish new docs to Wiki
+      - name: Publish new articles to Wiki (preserve formatting)
         run: |
           while IFS=$'\t' read -r url title; do
-            slug=$(basename "$url" | sed 's/[^a-zA-Z0-9_-]/-/g')
+            slug=$(basename "$url")
             file="wiki/$slug.md"
 
             if [ -f "$file" ]; then
@@ -61,30 +66,37 @@ jobs:
             fi
 
             echo "Publishing: $title"
+
             curl -L "$url" -o article.html
 
-            sed -n '/<article/,/<\/article>/p' article.html \
-              | sed 's/<[^>]*>//g' \
-              | sed '/^[[:space:]]*$/d' > body.txt
+            # Extract only article content
+            sed -n '/<article/,/<\/article>/p' article.html > article_only.html
+
+            # Convert HTML → Markdown with structure preserved
+            pandoc article_only.html \
+              -f html \
+              -t markdown_strict \
+              --wrap=preserve \
+              -o body.md
 
             {
               echo "# $title"
               echo ""
-              cat body.txt
+              cat body.md
               echo ""
               echo "---"
-              echo "🔗 **منبع اصلی:**"
+              echo "🔗 **منبع اصلی مقاله:**"
               echo ""
-              echo "👉 [$url]($url?utm_source=github_wiki&utm_medium=docs&utm_campaign=live_cctv)"
+              echo "👉 [$url]($url?utm_source=github_wiki&utm_medium=wiki&utm_campaign=ai_product_faq)"
             } > "$file"
 
           done < articles/list.txt
 
-      - name: Commit and push to Wiki
+      - name: Commit and push changes to Wiki
         run: |
           cd wiki
           git config user.name "github-actions"
           git config user.email "actions@github.com"
           git add .
-          git commit -m "Auto publish Live CCTV documentation" || exit 0
+          git commit -m "Auto publish WooCommerce Smart Product Q&A docs" || exit 0
           git push
