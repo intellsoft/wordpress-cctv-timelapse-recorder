@@ -1,0 +1,121 @@
+name: Publish Docs Articles To Wiki
+
+on:
+  schedule:
+    # Sunday 21:30 UTC = Monday 01:00 Iran
+    - cron: "30 21 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Clone Wiki
+        run: |
+          git clone https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/intellsoft/AI-Product-FAQ.wiki.git wiki
+
+      - name: Fetch Post Sitemap
+        run: |
+          curl -L "https://intellsoft.ir/post-sitemap.xml" -o post-sitemap.xml
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install beautifulsoup4 lxml requests
+
+      - name: Extract article URLs from sitemap
+        run: |
+          python3 <<'EOF'
+from bs4 import BeautifulSoup
+
+BASE_PATH = "woocommerce-smart-product-qa-wordpress-plugin-guide"
+
+with open("post-sitemap.xml", "r", encoding="utf-8") as f:
+    soup = BeautifulSoup(f, "xml")
+
+urls = []
+for loc in soup.find_all("loc"):
+    url = loc.get_text(strip=True)
+    if BASE_PATH in url:
+        urls.append(url)
+
+with open("urls.txt", "w", encoding="utf-8") as f:
+    for u in urls:
+        f.write(u + "\n")
+
+print(f"Found {len(urls)} related articles")
+EOF
+
+      - name: Publish new articles to Wiki
+        run: |
+          cd wiki || exit 1
+
+          while IFS= read -r url; do
+            [ -z "$url" ] && continue
+
+            slug=$(echo "$url" | sed 's|https://intellsoft.ir/||' | sed 's|/$||' | sed 's|/|-|g')
+            file="${slug}.md"
+
+            if [ -f "$file" ]; then
+              echo "✅ Already exists: $file"
+              continue
+            fi
+
+            echo "📝 Fetching: $url"
+            curl -L -s "$url" -o ../article.html
+
+            python3 <<EOF
+from bs4 import BeautifulSoup
+import sys
+
+with open("../article.html", "r", encoding="utf-8", errors="ignore") as f:
+    soup = BeautifulSoup(f.read(), "html.parser")
+
+article = soup.find("article")
+if not article:
+    sys.exit(1)
+
+title_tag = article.find("h1")
+title = title_tag.get_text(strip=True) if title_tag else "Documentation"
+
+for tag in article.select("script, style, nav, footer, .toc"):
+    tag.decompose()
+
+content = article.get_text(separator="\n\n", strip=True)
+
+with open("../body.md", "w", encoding="utf-8") as f:
+    f.write(f"# {title}\n\n")
+    f.write(content)
+    f.write("\n\n---\n\n")
+    f.write("🔗 **منبع اصلی مقاله:**\n\n")
+    f.write(f"👉 [{url}]({url}?utm_source=github_wiki&utm_medium=wiki&utm_campaign=product_faq)\n")
+EOF
+
+            if [ $? -eq 0 ]; then
+              mv ../body.md "$file"
+              echo "✅ Published: $file"
+            else
+              echo "⚠️ Failed: $url"
+            fi
+
+          done < ../urls.txt
+
+      - name: Commit and push to Wiki
+        run: |
+          cd wiki
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          git commit -m "chore: auto-publish new product FAQ docs"
+          git push
