@@ -1,0 +1,99 @@
+name: Publish Docs Article To Wiki
+
+on:
+  schedule:
+    # Sunday 21:30 UTC = Monday 01:30 Iran
+    - cron: "30 21 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo (not strictly needed, but keeps structure)
+        uses: actions/checkout@v4
+
+      - name: Clone target Wiki (with auth)
+        run: |
+          git clone https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/intellsoft/wordpress-cctv-timelapse-recorder.wiki.git wiki
+
+      - name: Fetch the source article page
+        run: |
+          curl -L https://intellsoft.ir/docs/live-cctv-camera-view-plugin-guide-for-website/ -o article.html
+
+      - name: Extract title and clean article content
+        id: extract
+        run: |
+          python3 - <<PYTHON
+          from bs4 import BeautifulSoup
+          import re
+
+          with open("article.html", encoding="utf-8") as f:
+              soup = BeautifulSoup(f, "html.parser")
+
+          # Extract article tag
+          article = soup.find("article")
+          if not article:
+              raise Exception("No <article> tag found")
+
+          # Try to get title: first <h1> inside article, else page title
+          h1 = article.find("h1")
+          if h1:
+              title = h1.get_text(strip=True)
+          else:
+              title_tag = soup.find("title")
+              title = title_tag.get_text(strip=True) if title_tag else "Untitled"
+
+          # Remove all HTML tags, keep plain text
+          text = article.get_text(separator="\n", strip=True)
+
+          # Write to files for later steps
+          with open("wiki/title.txt", "w", encoding="utf-8") as f:
+              f.write(title)
+          with open("wiki/body.txt", "w", encoding="utf-8") as f:
+              f.write(text)
+
+          # Generate slug from URL
+          slug = "live-cctv-camera-view-plugin-guide-for-website"
+          with open("wiki/slug.txt", "w", encoding="utf-8") as f:
+              f.write(slug)
+          PYTHON
+
+      - name: Create or update wiki page
+        run: |
+          SLUG=$(cat wiki/slug.txt)
+          TITLE=$(cat wiki/title.txt)
+          FILE="wiki/${SLUG}.md"
+
+          if [ -f "$FILE" ]; then
+            echo "Wiki page already exists: $TITLE — skipping"
+            exit 0
+          fi
+
+          echo "Publishing new page: $TITLE"
+          {
+            echo "# $TITLE"
+            echo ""
+            cat wiki/body.txt
+            echo ""
+            echo "---"
+            echo "🔗 **منبع اصلی مقاله:**"
+            echo ""
+            echo "👉 [https://intellsoft.ir/docs/live-cctv-camera-view-plugin-guide-for-website/](https://intellsoft.ir/docs/live-cctv-camera-view-plugin-guide-for-website/?utm_source=github_wiki&utm_medium=wiki&utm_campaign=live_cctv_plugin)"
+          } > "$FILE"
+
+          # Clean temporary files
+          rm -f wiki/title.txt wiki/body.txt wiki/slug.txt
+
+      - name: Commit and push to Wiki
+        run: |
+          cd wiki
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add .
+          git commit -m "Auto publish documentation article: Live CCTV Plugin Guide" || exit 0
+          git push
