@@ -2,6 +2,7 @@ name: Publish Docs Articles To Wiki
 
 on:
   schedule:
+    # Sunday 21:30 UTC = Monday 01:00 Iran
     - cron: "30 21 * * 0"
   workflow_dispatch:
 
@@ -27,79 +28,94 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install beautifulsoup4 lxml requests
+          pip install beautifulsoup4 lxml
 
       - name: Extract article URLs from sitemap
         run: |
           cat <<'EOF' > extract_urls.py
-          from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup
 
-          BASE_PATH = "woocommerce-smart-product-qa-wordpress-plugin-guide"
+BASE_PATH = "woocommerce-smart-product-qa-wordpress-plugin-guide"
 
-          with open("post-sitemap.xml", "r", encoding="utf-8") as f:
-              soup = BeautifulSoup(f, "xml")
+with open("post-sitemap.xml", "r", encoding="utf-8") as f:
+    soup = BeautifulSoup(f, "xml")
 
-          urls = []
-          for loc in soup.find_all("loc"):
-              url = loc.get_text(strip=True)
-              if BASE_PATH in url:
-                  urls.append(url)
+urls = []
+for loc in soup.find_all("loc"):
+    url = loc.get_text(strip=True)
+    if BASE_PATH in url:
+        urls.append(url)
 
-          with open("urls.txt", "w", encoding="utf-8") as f:
-              for u in urls:
-                  f.write(u + "\n")
+with open("urls.txt", "w", encoding="utf-8") as f:
+    for u in urls:
+        f.write(u + "\n")
 
-          print(f"Found {len(urls)} articles")
-          EOF
+print(f"Found {len(urls)} articles")
+EOF
 
           python3 extract_urls.py
 
       - name: Publish new articles to Wiki
         run: |
+          set -e
+
+          # Create extractor once (NO heredoc in loop)
+          cat <<'EOF' > extract_body.py
+from bs4 import BeautifulSoup
+import sys
+
+url = sys.argv[1]
+
+with open("article.html", "r", encoding="utf-8", errors="ignore") as f:
+    soup = BeautifulSoup(f.read(), "html.parser")
+
+article = soup.find("article")
+if not article:
+    sys.exit(1)
+
+title_tag = article.find("h1")
+title = title_tag.get_text(strip=True) if title_tag else "Documentation"
+
+for tag in article.select("script, style, nav, footer, .toc"):
+    tag.decompose()
+
+content = article.get_text(separator="\n\n", strip=True)
+
+with open("body.md", "w", encoding="utf-8") as f:
+    f.write(f"# {title}\n\n")
+    f.write(content)
+    f.write("\n\n---\n\n")
+    f.write("🔗 **منبع اصلی مقاله:**\n\n")
+    f.write(
+        f"👉 [{url}]({url}?utm_source=github_wiki&utm_medium=wiki&utm_campaign=product_faq)\n"
+    )
+EOF
+
           cd wiki || exit 1
 
           while IFS= read -r url; do
             [ -z "$url" ] && continue
 
-            slug=$(echo "$url" | sed 's|https://intellsoft.ir/||' | sed 's|/$||' | sed 's|/|-|g')
+            slug=$(echo "$url" \
+              | sed 's|https://intellsoft.ir/||' \
+              | sed 's|/$||' \
+              | sed 's|/|-|g')
+
             file="${slug}.md"
 
             if [ -f "$file" ]; then
-              echo "Already exists: $file"
+              echo "✅ Already exists: $file"
               continue
             fi
 
-            echo "Processing: $url"
-            curl -L -s "$url" -o ../article.html
+            echo "📝 Processing: $url"
+            curl -L -s "$url" -o article.html
 
-            cat <<'EOF' > ../extract_body.py
-            from bs4 import BeautifulSoup
-            import sys
+            python3 ../extract_body.py "$url"
+            mv ../body.md "$file"
 
-            with open("../article.html", "r", encoding="utf-8", errors="ignore") as f:
-                soup = BeautifulSoup(f.read(), "html.parser")
+            echo "✅ Published: $file"
 
-            article = soup.find("article")
-            if not article:
-                sys.exit(1)
-
-            title_tag = article.find("h1")
-            title = title_tag.get_text(strip=True) if title_tag else "Documentation"
-
-            for tag in article.select("script, style, nav, footer, .toc"):
-                tag.decompose()
-
-            content = article.get_text(separator="\n\n", strip=True)
-
-            with open("../body.md", "w", encoding="utf-8") as f:
-                f.write(f"# {title}\n\n")
-                f.write(content)
-                f.write("\n\n---\n\n")
-                f.write("🔗 **منبع اصلی مقاله:**\n\n")
-                f.write(f"👉 [{sys.argv[1]}]({sys.argv[1]}?utm_source=github_wiki&utm_medium=wiki&utm_campaign=product_faq)\n")
-            EOF
-
-            python3 ../extract_body.py "$url" && mv ../body.md "$file"
           done < ../urls.txt
 
       - name: Commit and push to Wiki
