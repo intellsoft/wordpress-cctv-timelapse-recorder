@@ -1,8 +1,8 @@
-name: Publish WooCommerce Smart Product Q&A Docs To Wiki
+name: Publish Docs Articles To Wiki (WordPress Plugin)
 
 on:
   schedule:
-    # Sunday 21:30 UTC = Monday 01:00 Iran
+    # Sunday 21:30 UTC = Monday 01:30 Iran
     - cron: "30 21 * * 0"
   workflow_dispatch:
 
@@ -14,89 +14,124 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Clone Wiki repository
+      - name: Clone Wiki (with PAT)
         run: |
-          git clone https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/intellsoft/AI-Product-FAQ.wiki.git wiki
+          git clone https://x-access-token:${{ secrets.WIKI_PAT }}@github.com/intellsoft/wordpress-cctv-timelapse-recorder.wiki.git wiki
 
-      - name: Fetch source documentation page
+      - name: Fetch sitemap
         run: |
-          curl -L https://intellsoft.ir/docs/woocommerce-smart-product-qa-wordpress-plugin-guide/ -o index.html
+          curl -L https://intellsoft.ir/docs-sitemap.xml -o sitemap.xml
 
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y pandoc
           python -m pip install --upgrade pip
-          pip install beautifulsoup4
+          pip install beautifulsoup4 requests
 
-      - name: Extract article links from navigation
+      - name: Extract all article URLs from sitemap
         run: |
           mkdir -p articles
-          python3 - <<'PYTHON'
-          from bs4 import BeautifulSoup
+          python3 <<EOF
+          import xml.etree.ElementTree as ET
+          tree = ET.parse('sitemap.xml')
+          root = tree.getroot()
+          ns = {'s': 'http://www.sitemaps.org/schemas/sitemap/0.9'}
+          urls = []
+          for url in root.findall('s:url', ns):
+              loc = url.find('s:loc', ns)
+              if loc is not None and loc.text:
+                  urls.append(loc.text)
+          with open('articles/urls.txt', 'w', encoding='utf-8') as f:
+              for u in urls:
+                  f.write(u + '\n')
+          EOF
 
-          with open("index.html", encoding="utf-8") as f:
-              soup = BeautifulSoup(f, "html.parser")
-
-          links = soup.find_all("a", class_="nav-link")
-
-          with open("articles/list.txt", "w", encoding="utf-8") as out:
-              for a in links:
-                  href = a.get("href")
-                  title = a.get_text(strip=True)
-                  if not href or not title:
-                      continue
-                  if href.startswith("/"):
-                      href = "https://intellsoft.ir" + href
-                  out.write(f"{href}\t{title}\n")
-          PYTHON
-
-      - name: Publish new articles to Wiki (preserve formatting)
+      - name: Publish new articles to Wiki
         run: |
-          while IFS=$'\t' read -r url title; do
-            slug=$(basename "$url")
+          while IFS= read -r url; do
+            # Remove trailing slash and extract slug
+            clean_url=$(echo "$url" | sed 's:/*$::')
+            slug=$(basename "$clean_url")
             file="wiki/$slug.md"
 
             if [ -f "$file" ]; then
-              echo "Already exists: $title"
+              echo "Already exists: $url"
               continue
             fi
 
-            echo "Publishing: $title"
-
+            echo "Publishing: $url"
             curl -L "$url" -o article.html
 
-            # Extract only article content
-            sed -n '/<article/,/<\/article>/p' article.html > article_only.html
+            export URL="$url"
+            python3 <<'PYTHON_SCRIPT' > "$file"
+import os
+import sys
+from bs4 import BeautifulSoup
+from urllib.parse import urljoin, urlparse
 
-            # Convert HTML → Markdown with structure preserved
-            pandoc article_only.html \
-              -f html \
-              -t markdown_strict \
-              --wrap=preserve \
-              -o body.md
+url = os.environ.get('URL')
+if not url:
+    sys.exit("URL not set")
 
-            {
-              echo "# $title"
-              echo ""
-              cat body.md
-              echo ""
-              echo "---"
-              echo "🔗 **منبع اصلی مقاله:**"
-              echo ""
-              echo "👉 [$url]($url?utm_source=github_wiki&utm_medium=wiki&utm_campaign=ai_product_faq)"
-            } > "$file"
+# Extract base URL (scheme + domain)
+parsed = urlparse(url)
+base_url = f"{parsed.scheme}://{parsed.netloc}"
 
-          done < articles/list.txt
+with open('article.html', encoding='utf-8') as f:
+    soup = BeautifulSoup(f, 'html.parser')
 
-      - name: Commit and push changes to Wiki
+# Extract title
+title_tag = soup.find('title')
+title = title_tag.get_text(strip=True) if title_tag else 'بدون عنوان'
+
+# Extract main content (try common containers)
+article = soup.find('article')
+if not article:
+    article = soup.find('main')
+if not article:
+    article = soup.find('div', class_='content')
+if not article:
+    article = soup.find('div', class_='post-content')
+if not article:
+    article = soup.find('div', class_='entry-content')
+if not article:
+    # Fallback to body (may include header/footer, but better than nothing)
+    article = soup.body
+if not article:
+    article = soup
+
+# Convert relative links/images to absolute
+for tag in article.find_all(['a', 'img']):
+    if tag.name == 'a' and tag.has_attr('href'):
+        href = tag['href']
+        if href.startswith('/'):
+            tag['href'] = urljoin(base_url, href)
+    elif tag.name == 'img' and tag.has_attr('src'):
+        src = tag['src']
+        if src.startswith('/'):
+            tag['src'] = urljoin(base_url, src)
+
+# Build final Markdown content
+content = f'# {title}\n\n'
+content += str(article)
+content += '\n\n---\n'
+content += '🔗 **منبع اصلی مقاله:**\n\n'
+content += f'👉 [{url}]({url}?utm_source=github_wiki&utm_medium=wiki&utm_campaign=wordpress_cctv_docs)\n'
+
+sys.stdout.write(content)
+PYTHON_SCRIPT
+
+            rm -f article.html
+
+          done < articles/urls.txt
+
+      - name: Commit and push to Wiki
         run: |
           cd wiki
           git config user.name "github-actions"
           git config user.email "actions@github.com"
           git add .
-          git commit -m "Auto publish WooCommerce Smart Product Q&A docs" || exit 0
+          git commit -m "Auto publish new documentation articles to Wiki" || exit 0
           git push
